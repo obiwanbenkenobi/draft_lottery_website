@@ -1,4 +1,9 @@
 <!doctype html>
+<!--
+  ===============================================================
+    sminky's season ends in week 1
+  ===============================================================
+-->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -13,11 +18,31 @@
         <p class="subtitle">Six teams. Six picks. May the worst team win.</p>
       </header>
 
+      <section class="card" id="sleeper-card">
+        <h2>Connect Sleeper League</h2>
+        <p class="hint">
+          Paste your Sleeper league ID (the number in
+          <code>sleeper.com/leagues/&lt;id&gt;</code>) to auto-fill team names and
+          logos for the bottom six finishers.
+        </p>
+        <div class="sleeper-form">
+          <input
+            id="sleeper-id"
+            type="text"
+            inputmode="numeric"
+            placeholder="Sleeper league ID"
+            autocomplete="off"
+          />
+          <button id="sleeper-load" class="ghost">Load from Sleeper</button>
+        </div>
+        <p id="sleeper-status" class="sleeper-status" hidden></p>
+      </section>
+
       <section class="card" id="setup">
         <h2>Teams</h2>
         <p class="hint">
-          Enter the team that finished in each standings position. Worse finishers
-          get better odds at the #1 pick.
+          Enter the team that finished in each standings position, or load them
+          from Sleeper above. Worse finishers get better odds at the #1 pick.
         </p>
         <div class="teams-grid" id="teams-grid"></div>
       </section>
