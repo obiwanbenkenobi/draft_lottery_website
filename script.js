@@ -184,6 +184,61 @@ async function rollSlot(slot, allNames, duration) {
   }
 }
 
+function setupLotteryMachine() {
+  const machine = document.getElementById("lottery-machine");
+  const tumbler = document.getElementById("machine-tumbler");
+  machine.hidden = false;
+  machine.classList.remove("fading");
+  tumbler.innerHTML = "";
+
+  // Distribute balls across the tumbler with slight overlap for a "tumbling" feel.
+  POSITIONS.forEach((p) => {
+    const ball = document.createElement("div");
+    ball.className = "ball";
+    ball.dataset.finish = String(p.finish);
+
+    const x = 6 + Math.random() * 78; // % from left
+    const y = 12 + Math.random() * 60; // % from top
+    ball.style.left = `${x}%`;
+    ball.style.top = `${y}%`;
+
+    // Each ball gets its own float vector + duration so motion looks chaotic.
+    const dx = (Math.random() - 0.5) * 36;
+    const dy = (Math.random() - 0.5) * 28;
+    ball.style.setProperty("--ball-dx", `${dx}px`);
+    ball.style.setProperty("--ball-dy", `${dy}px`);
+    ball.style.animationDuration = `${1.2 + Math.random() * 1.1}s`;
+    ball.style.animationDelay = `${(-Math.random() * 2).toFixed(2)}s`;
+
+    ball.textContent = ordinal(p.finish);
+    tumbler.appendChild(ball);
+  });
+}
+
+async function drawBall(finishPosition, suspenseDuration) {
+  const tumbler = document.getElementById("machine-tumbler");
+  tumbler.classList.add("shaking");
+  await wait(suspenseDuration);
+  tumbler.classList.remove("shaking");
+
+  const winner = tumbler.querySelector(
+    `.ball[data-finish="${finishPosition}"]`
+  );
+  if (winner) {
+    winner.classList.add("winning");
+    await wait(850); // matches ball-winning animation duration
+    winner.classList.add("exited");
+  }
+}
+
+function hideLotteryMachine() {
+  const machine = document.getElementById("lottery-machine");
+  machine.classList.add("fading");
+  setTimeout(() => {
+    machine.hidden = true;
+  }, 500);
+}
+
 function attachAvatar(slot, avatarUrl) {
   if (!avatarUrl) return;
   const img = document.createElement("img");
@@ -259,6 +314,8 @@ async function dramaticReveal(order) {
   const teams = getTeams();
   section.hidden = false;
 
+  setupLotteryMachine();
+
   const slots = buildPlaceholderSlots(12);
 
   // Pre-fill picks 7-12 from playoff data so they're visible while picks 1-6 are drawn.
@@ -286,14 +343,19 @@ async function dramaticReveal(order) {
 
     await wait(450);
 
+    // Tumbler shakes and slot text rolls in parallel; both end together.
     const duration = 1200 + (order.length - 1 - i) * 400;
-    await rollSlot(slot, allNames, duration);
+    await Promise.all([
+      rollSlot(slot, allNames, duration),
+      drawBall(order[i].finish, duration),
+    ]);
 
     fillSlot(slot, team, `finished ${ordinal(order[i].finish)}`);
 
     await wait(i === 0 ? 1400 : 750);
   }
 
+  hideLotteryMachine();
   status.textContent = "Draft order finalized.";
 }
 
