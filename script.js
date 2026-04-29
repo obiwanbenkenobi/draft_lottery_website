@@ -265,16 +265,19 @@ async function loadSleeperLeague(leagueId) {
   const enriched = rosters.map((r) => {
     const s = r.settings || {};
     const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
+    const maxPf = (s.ppts || 0) + (s.ppts_decimal || 0) / 100;
     return {
       roster: r,
       wins: s.wins || 0,
       ties: s.ties || 0,
       fpts,
+      maxPf,
     };
   });
 
-  // Identify non-playoff teams by record, then order them by points-for.
-  // Within the lottery, highest PF = 7th seed (worst odds), lowest PF = 12th (best odds).
+  // Identify non-playoff teams by record, then order them by max points-for
+  // (Sleeper's `ppts` = potential points = sum of weekly optimal-lineup scores).
+  // Highest max PF = 7th seed (worst odds), lowest max PF = 12th (best odds).
   const playoffTeams = league?.settings?.playoff_teams ?? 6;
   const byRecord = [...enriched].sort(
     (a, b) => b.wins - a.wins || b.ties - a.ties || b.fpts - a.fpts
@@ -282,7 +285,7 @@ async function loadSleeperLeague(leagueId) {
   const nonPlayoff = byRecord.slice(playoffTeams);
   const lotterySize = POSITIONS.length;
   const lottery = [...nonPlayoff]
-    .sort((a, b) => b.fpts - a.fpts)
+    .sort((a, b) => b.maxPf - a.maxPf)
     .slice(0, lotterySize);
 
   for (const key of Object.keys(teamData)) delete teamData[key];
