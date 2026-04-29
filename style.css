@@ -293,9 +293,22 @@ button.ghost:hover {
   margin-top: 2px;
 }
 
+.results li .pick-traded {
+  color: var(--accent);
+  font-size: 0.8rem;
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.results li .pick-traded::before {
+  content: "→ ";
+}
+
 .results li .from {
   color: var(--muted);
   font-size: 0.9rem;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 .pick-slot.pending {

@@ -19,8 +19,16 @@ const ORDINAL_SUFFIX = {
 };
 
 // Per-finish-position metadata loaded from Sleeper. Keys are finish numbers (7..12).
-// Inputs always override names, so this only carries owner / avatar info.
+// Inputs always override names; the rest carries owner / avatar / max-PF / roster info.
 const teamData = {};
+
+// Playoff-team draft order (picks 7-12). Index 0 = pick 7 (6th place); index 5 = pick 12 (champion).
+// Each entry: { name, ownerName, avatarUrl, maxPf, rosterId } or null if not derivable.
+const playoffPicks = [];
+
+// First-round pick ownership for next season's draft, keyed by the original team's roster_id.
+// Only populated when a pick has been traded.
+const pickOwnerByRosterId = new Map();
 
 function ordinal(n) {
   return `${n}${ORDINAL_SUFFIX[n] ?? "th"}`;
@@ -77,11 +85,14 @@ function renderTeamInputs() {
     if (data?.name) input.value = data.name;
     fields.appendChild(input);
 
-    if (data?.ownerName) {
-      const owner = document.createElement("span");
-      owner.className = "team-owner";
-      owner.textContent = `@${data.ownerName}`;
-      fields.appendChild(owner);
+    const metaParts = [];
+    if (data?.ownerName) metaParts.push(`@${data.ownerName}`);
+    if (data?.maxPf != null) metaParts.push(`Max PF ${data.maxPf.toFixed(2)}`);
+    if (metaParts.length) {
+      const meta = document.createElement("span");
+      meta.className = "team-owner";
+      meta.textContent = metaParts.join(" • ");
+      fields.appendChild(meta);
     }
 
     row.appendChild(fields);
@@ -111,6 +122,8 @@ function getTeams() {
       name,
       ownerName: data.ownerName || null,
       avatarUrl: data.avatarUrl || null,
+      maxPf: data.maxPf ?? null,
+      rosterId: data.rosterId ?? null,
     };
   }
   return teams;
@@ -183,23 +196,89 @@ function attachAvatar(slot, avatarUrl) {
   slot.insertBefore(img, fields);
 }
 
+function playoffFromLabel(pick) {
+  // pick → finishing position (pick 7 = 6th place, pick 12 = champion).
+  switch (pick) {
+    case 7: return "6th — lower 5/6 PF";
+    case 8: return "5th — higher 5/6 PF";
+    case 9: return "4th place";
+    case 10: return "3rd place";
+    case 11: return "runner-up";
+    case 12: return "champion";
+    default: return "";
+  }
+}
+
+function fillSlot(slot, team, fromLabel) {
+  const nameEl = slot.querySelector(".team-name");
+  const fromEl = slot.querySelector(".from");
+  const fields = slot.querySelector(".pick-fields");
+
+  // Clear any prior owner/traded lines (in case slot was pre-filled then re-filled).
+  for (const el of fields.querySelectorAll(".pick-owner, .pick-traded")) {
+    el.remove();
+  }
+  const existingAvatar = slot.querySelector(".pick-avatar");
+  if (existingAvatar) existingAvatar.remove();
+
+  nameEl.classList.remove("rolling");
+  nameEl.textContent = team.name;
+  fromEl.textContent = fromLabel || "";
+  attachAvatar(slot, team.avatarUrl);
+
+  const ownerParts = [];
+  if (team.ownerName) ownerParts.push(`@${team.ownerName}`);
+  if (team.maxPf != null) ownerParts.push(`Max PF ${team.maxPf.toFixed(2)}`);
+  if (ownerParts.length) {
+    const owner = document.createElement("span");
+    owner.className = "pick-owner";
+    owner.textContent = ownerParts.join(" • ");
+    fields.appendChild(owner);
+  }
+
+  if (team.rosterId != null) {
+    const tradedTo = pickOwnerByRosterId.get(team.rosterId);
+    if (tradedTo) {
+      const line = document.createElement("span");
+      line.className = "pick-traded";
+      const label = tradedTo.ownerName
+        ? `Pick owned by @${tradedTo.ownerName}`
+        : "Pick has been traded";
+      line.textContent = label;
+      fields.appendChild(line);
+    }
+  }
+
+  slot.classList.remove("pending");
+  slot.classList.add("revealed");
+}
+
 async function dramaticReveal(order) {
   const section = document.getElementById("results");
   const status = document.getElementById("draw-status");
   const teams = getTeams();
   section.hidden = false;
 
-  const slots = buildPlaceholderSlots(order.length);
-  const allNames = Object.values(teams).map((t) => t.name);
+  const slots = buildPlaceholderSlots(12);
+
+  // Pre-fill picks 7-12 from playoff data so they're visible while picks 1-6 are drawn.
+  for (let i = 6; i < 12; i++) {
+    const data = playoffPicks[i - 6];
+    const slot = slots[i];
+    if (data) {
+      fillSlot(slot, data, playoffFromLabel(i + 1));
+    } else {
+      slot.querySelector(".from").textContent = playoffFromLabel(i + 1);
+    }
+  }
+
+  const allNames = Object.values(teams).map((t) => t.name).filter(Boolean);
 
   section.scrollIntoView({ behavior: "smooth", block: "start" });
   await wait(600);
 
   for (let i = order.length - 1; i >= 0; i--) {
     const slot = slots[i];
-    const nameEl = slot.querySelector(".team-name");
-    const fromEl = slot.querySelector(".from");
-    const fields = slot.querySelector(".pick-fields");
     const team = teams[order[i].finish];
 
     status.textContent =
@@ -210,20 +289,7 @@ async function dramaticReveal(order) {
     const duration = 1200 + (order.length - 1 - i) * 400;
     await rollSlot(slot, allNames, duration);
 
-    nameEl.classList.remove("rolling");
-    nameEl.textContent = team.name;
-    fromEl.textContent = `finished ${ordinal(order[i].finish)}`;
-    attachAvatar(slot, team.avatarUrl);
-
-    if (team.ownerName) {
-      const owner = document.createElement("span");
-      owner.className = "pick-owner";
-      owner.textContent = `@${team.ownerName}`;
-      fields.appendChild(owner);
-    }
-
-    slot.classList.remove("pending");
-    slot.classList.add("revealed");
+    fillSlot(slot, team, `finished ${ordinal(order[i].finish)}`);
 
     await wait(i === 0 ? 1400 : 750);
   }
@@ -248,12 +314,90 @@ function buildAvatarUrl(user) {
   return null;
 }
 
+// Walks the Sleeper winners_bracket and returns the playoff-team draft order.
+// Returns array of 6 entries: [pick7Team, pick8Team, ..., pick12Team], where
+// pick 7 = 6th place, pick 12 = champion. Picks 7 and 8 are split by max PF
+// (lower max PF → pick 7) per league rule.
+function computePlayoffOrder(bracket, rosterById) {
+  const out = [null, null, null, null, null, null];
+  if (!Array.isArray(bracket)) return out;
+
+  for (const m of bracket) {
+    if (m.p === 1) {
+      out[5] = rosterById.get(m.w) || null; // champion → pick 12
+      out[4] = rosterById.get(m.l) || null; // runner-up → pick 11
+    } else if (m.p === 3) {
+      out[3] = rosterById.get(m.w) || null; // 3rd place → pick 10
+      out[2] = rosterById.get(m.l) || null; // 4th place → pick 9
+    } else if (m.p === 5) {
+      const t1 = m.t1 != null ? rosterById.get(m.t1) : null;
+      const t2 = m.t2 != null ? rosterById.get(m.t2) : null;
+      if (t1 && t2) {
+        const [higher, lower] =
+          t1.maxPf >= t2.maxPf ? [t1, t2] : [t2, t1];
+        out[1] = higher; // higher max PF → 5th → pick 8
+        out[0] = lower; // lower max PF → 6th → pick 7
+      } else if (t1 || t2) {
+        out[1] = t1 || t2;
+      }
+    }
+  }
+
+  return out;
+}
+
+// Builds a map of original-roster-id → current owner for next-season round-1 picks.
+// Walks the trade chain so a pick traded A→B→C lands on C.
+function buildPickOwnerMap(tradedPicks, season, rosterById) {
+  pickOwnerByRosterId.clear();
+  if (!Array.isArray(tradedPicks)) return;
+
+  const relevant = tradedPicks.filter(
+    (tp) => tp.round === 1 && String(tp.season) === season
+  );
+  if (!relevant.length) return;
+
+  const tradesByOriginal = new Map();
+  for (const tp of relevant) {
+    if (!tradesByOriginal.has(tp.roster_id)) tradesByOriginal.set(tp.roster_id, []);
+    tradesByOriginal.get(tp.roster_id).push(tp);
+  }
+
+  for (const [originalRosterId, trades] of tradesByOriginal) {
+    let current = originalRosterId;
+    let progressed = true;
+    let safety = trades.length + 1;
+    while (progressed && safety-- > 0) {
+      progressed = false;
+      for (const tp of trades) {
+        if (tp.previous_owner_id === current) {
+          current = tp.owner_id;
+          progressed = true;
+          break;
+        }
+      }
+    }
+    if (current !== originalRosterId) {
+      const newOwner = rosterById.get(current);
+      if (newOwner) {
+        pickOwnerByRosterId.set(originalRosterId, {
+          ownerName: newOwner.ownerName,
+          avatarUrl: newOwner.avatarUrl,
+          teamName: newOwner.teamName,
+        });
+      }
+    }
+  }
+}
+
 async function loadSleeperLeague(leagueId) {
   const base = `https://api.sleeper.app/v1/league/${encodeURIComponent(leagueId)}`;
-  const [league, users, rosters] = await Promise.all([
+  const [league, users, rosters, bracket, tradedPicks] = await Promise.all([
     fetch(base).then(handleSleeperResponse),
     fetch(`${base}/users`).then(handleSleeperResponse),
     fetch(`${base}/rosters`).then(handleSleeperResponse),
+    fetch(`${base}/winners_bracket`).then((r) => (r.ok ? r.json() : [])),
+    fetch(`${base}/traded_picks`).then((r) => (r.ok ? r.json() : [])),
   ]);
 
   if (!Array.isArray(users) || !Array.isArray(rosters) || rosters.length === 0) {
@@ -261,22 +405,30 @@ async function loadSleeperLeague(leagueId) {
   }
 
   const userById = new Map(users.map((u) => [u.user_id, u]));
+  const rosterById = new Map();
 
   const enriched = rosters.map((r) => {
     const s = r.settings || {};
     const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
     const maxPf = (s.ppts || 0) + (s.ppts_decimal || 0) / 100;
-    return {
-      roster: r,
+    const owner = userById.get(r.owner_id) || null;
+    const customName = owner?.metadata?.team_name;
+    const teamName = customName || owner?.display_name || `Roster ${r.roster_id}`;
+    const entry = {
+      rosterId: r.roster_id,
+      teamName,
+      ownerName: owner?.display_name || null,
+      avatarUrl: owner ? buildAvatarUrl(owner) : null,
       wins: s.wins || 0,
       ties: s.ties || 0,
       fpts,
       maxPf,
     };
+    rosterById.set(r.roster_id, entry);
+    return entry;
   });
 
-  // Identify non-playoff teams by record, then order them by max points-for
-  // (Sleeper's `ppts` = potential points = sum of weekly optimal-lineup scores).
+  // Identify non-playoff teams by record, then order them by max points-for.
   // Highest max PF = 7th seed (worst odds), lowest max PF = 12th (best odds).
   const playoffTeams = league?.settings?.playoff_teams ?? 6;
   const byRecord = [...enriched].sort(
@@ -288,27 +440,49 @@ async function loadSleeperLeague(leagueId) {
     .sort((a, b) => b.maxPf - a.maxPf)
     .slice(0, lotterySize);
 
+  // Reset persistent Sleeper state.
   for (const key of Object.keys(teamData)) delete teamData[key];
+  playoffPicks.length = 0;
 
   let filled = 0;
   POSITIONS.forEach((p, i) => {
     const standing = lottery[i];
     if (!standing) return;
-    const owner = userById.get(standing.roster.owner_id);
-    if (!owner) return;
-
-    const customName = owner.metadata && owner.metadata.team_name;
-    const teamName = customName || owner.display_name || "Unknown Team";
-
     teamData[p.finish] = {
-      name: teamName,
-      ownerName: owner.display_name || null,
-      avatarUrl: buildAvatarUrl(owner),
+      name: standing.teamName,
+      ownerName: standing.ownerName,
+      avatarUrl: standing.avatarUrl,
+      maxPf: standing.maxPf,
+      rosterId: standing.rosterId,
     };
     filled++;
   });
 
-  return { teamCount: filled };
+  // Compute playoff finishing order from the winners_bracket (picks 7-12).
+  const playoffOrder = computePlayoffOrder(bracket, rosterById);
+  for (const standing of playoffOrder) {
+    if (!standing) {
+      playoffPicks.push(null);
+    } else {
+      playoffPicks.push({
+        name: standing.teamName,
+        ownerName: standing.ownerName,
+        avatarUrl: standing.avatarUrl,
+        maxPf: standing.maxPf,
+        rosterId: standing.rosterId,
+      });
+    }
+  }
+
+  // First-round pick ownership for next year's draft.
+  const nextSeason = String(Number(league?.season || 0) + 1);
+  buildPickOwnerMap(tradedPicks, nextSeason, rosterById);
+
+  return {
+    teamCount: filled,
+    playoffCount: playoffPicks.filter(Boolean).length,
+    tradedCount: pickOwnerByRosterId.size,
+  };
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -348,12 +522,15 @@ document.addEventListener("DOMContentLoaded", () => {
     sleeperBtn.disabled = true;
     setSleeperStatus("Loading league…");
     try {
-      const { teamCount } = await loadSleeperLeague(id);
+      const { teamCount, playoffCount, tradedCount } =
+        await loadSleeperLeague(id);
       renderTeamInputs();
-      setSleeperStatus(
-        `Loaded ${teamCount} team${teamCount === 1 ? "" : "s"} from Sleeper.`,
-        "success"
-      );
+      const parts = [
+        `Loaded ${teamCount} lottery team${teamCount === 1 ? "" : "s"}`,
+      ];
+      if (playoffCount) parts.push(`${playoffCount} playoff team${playoffCount === 1 ? "" : "s"}`);
+      if (tradedCount) parts.push(`${tradedCount} traded 1st-round pick${tradedCount === 1 ? "" : "s"}`);
+      setSleeperStatus(parts.join(", ") + ".", "success");
     } catch (err) {
       setSleeperStatus(err.message || "Failed to load league.", "error");
     } finally {
