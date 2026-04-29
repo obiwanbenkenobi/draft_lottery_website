@@ -250,7 +250,8 @@ function buildAvatarUrl(user) {
 
 async function loadSleeperLeague(leagueId) {
   const base = `https://api.sleeper.app/v1/league/${encodeURIComponent(leagueId)}`;
-  const [users, rosters] = await Promise.all([
+  const [league, users, rosters] = await Promise.all([
+    fetch(base).then(handleSleeperResponse),
     fetch(`${base}/users`).then(handleSleeperResponse),
     fetch(`${base}/rosters`).then(handleSleeperResponse),
   ]);
@@ -261,29 +262,34 @@ async function loadSleeperLeague(leagueId) {
 
   const userById = new Map(users.map((u) => [u.user_id, u]));
 
-  // Sort by standings: wins desc, ties desc, points-for desc.
-  const sorted = rosters
-    .map((r) => {
-      const s = r.settings || {};
-      const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
-      return {
-        roster: r,
-        wins: s.wins || 0,
-        ties: s.ties || 0,
-        fpts,
-      };
-    })
-    .sort((a, b) => b.wins - a.wins || b.ties - a.ties || b.fpts - a.fpts);
+  const enriched = rosters.map((r) => {
+    const s = r.settings || {};
+    const fpts = (s.fpts || 0) + (s.fpts_decimal || 0) / 100;
+    return {
+      roster: r,
+      wins: s.wins || 0,
+      ties: s.ties || 0,
+      fpts,
+    };
+  });
 
+  // Identify non-playoff teams by record, then order them by points-for.
+  // Within the lottery, highest PF = 7th seed (worst odds), lowest PF = 12th (best odds).
+  const playoffTeams = league?.settings?.playoff_teams ?? 6;
+  const byRecord = [...enriched].sort(
+    (a, b) => b.wins - a.wins || b.ties - a.ties || b.fpts - a.fpts
+  );
+  const nonPlayoff = byRecord.slice(playoffTeams);
   const lotterySize = POSITIONS.length;
-  const bottom = sorted.slice(-lotterySize); // worst N — bottom[0] = best of the worst
+  const lottery = [...nonPlayoff]
+    .sort((a, b) => b.fpts - a.fpts)
+    .slice(0, lotterySize);
 
-  // Reset before re-populating.
   for (const key of Object.keys(teamData)) delete teamData[key];
 
   let filled = 0;
   POSITIONS.forEach((p, i) => {
-    const standing = bottom[i];
+    const standing = lottery[i];
     if (!standing) return;
     const owner = userById.get(standing.roster.owner_id);
     if (!owner) return;
