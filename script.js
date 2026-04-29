@@ -30,6 +30,14 @@ const playoffPicks = [];
 // Only populated when a pick has been traded.
 const pickOwnerByRosterId = new Map();
 
+// --- Live sync state (Firebase Realtime Database) ---
+const liveSyncSearch = new URLSearchParams(window.location.search);
+const isHost = liveSyncSearch.has("host");
+const liveRoomId = window.lotteryRoomId || "default";
+const liveInstanceId = Math.random().toString(36).slice(2);
+let liveDb = null;
+let lastAppliedTimestamp = 0;
+
 function ordinal(n) {
   return `${n}${ORDINAL_SUFFIX[n] ?? "th"}`;
 }
@@ -452,6 +460,101 @@ function buildPickOwnerMap(tradedPicks, season, rosterById) {
   }
 }
 
+function isFirebaseConfigured() {
+  const c = window.firebaseConfig;
+  if (!c || typeof firebase === "undefined") return false;
+  if (!c.apiKey || c.apiKey.startsWith("YOUR_")) return false;
+  if (!c.databaseURL || c.databaseURL.includes("YOUR_PROJECT")) return false;
+  return true;
+}
+
+function initLiveSync() {
+  if (!isFirebaseConfigured()) return;
+  try {
+    firebase.initializeApp(window.firebaseConfig);
+    liveDb = firebase.database();
+  } catch (err) {
+    console.warn("Firebase init failed:", err);
+    return;
+  }
+
+  liveDb.ref(`lottery/${liveRoomId}`).on("value", (snap) => {
+    const data = snap.val();
+    if (data) handleRemoteLotteryState(data);
+  });
+
+  const indicator = document.getElementById("live-indicator");
+  if (indicator) {
+    indicator.hidden = false;
+    indicator.textContent = isHost ? "Live · Host" : "Live · Viewer";
+  }
+
+  if (!isHost) {
+    document.body.classList.add("viewer-mode");
+    const waiting = document.getElementById("waiting-card");
+    if (waiting) waiting.hidden = false;
+  }
+}
+
+function publishLotteryState(order) {
+  if (!liveDb || !isHost) return;
+  const payload = {
+    hostInstanceId: liveInstanceId,
+    publishedAt: firebase.database.ServerValue.TIMESTAMP,
+    order: order.map((p) => ({
+      label: p.label,
+      finish: p.finish,
+      threshold: p.threshold,
+    })),
+    teamData: { ...teamData },
+    playoffPicks: playoffPicks.map((p) => p || null),
+    pickOwners: Object.fromEntries(
+      Array.from(pickOwnerByRosterId.entries()).map(([k, v]) => [String(k), v])
+    ),
+  };
+  liveDb.ref(`lottery/${liveRoomId}`).set(payload).catch((err) => {
+    console.warn("Failed to publish lottery state:", err);
+  });
+}
+
+async function handleRemoteLotteryState(data) {
+  if (!data || !data.publishedAt) return;
+  if (data.publishedAt <= lastAppliedTimestamp) return;
+  lastAppliedTimestamp = data.publishedAt;
+
+  // Host already animated locally from their own click — don't replay.
+  if (isHost) return;
+
+  // Hydrate state for the viewer.
+  for (const key of Object.keys(teamData)) delete teamData[key];
+  if (data.teamData) {
+    for (const [finish, info] of Object.entries(data.teamData)) {
+      teamData[Number(finish)] = info;
+    }
+  }
+
+  playoffPicks.length = 0;
+  if (Array.isArray(data.playoffPicks)) {
+    for (const p of data.playoffPicks) playoffPicks.push(p || null);
+  }
+
+  pickOwnerByRosterId.clear();
+  if (data.pickOwners) {
+    for (const [k, v] of Object.entries(data.pickOwners)) {
+      pickOwnerByRosterId.set(Number(k), v);
+    }
+  }
+
+  renderTeamInputs();
+
+  const waiting = document.getElementById("waiting-card");
+  if (waiting) waiting.hidden = true;
+
+  if (Array.isArray(data.order) && data.order.length) {
+    await dramaticReveal(data.order);
+  }
+}
+
 async function loadSleeperLeague(leagueId) {
   const base = `https://api.sleeper.app/v1/league/${encodeURIComponent(leagueId)}`;
   const [league, users, rosters, bracket, tradedPicks] = await Promise.all([
@@ -550,6 +653,7 @@ async function loadSleeperLeague(leagueId) {
 document.addEventListener("DOMContentLoaded", () => {
   renderTeamInputs();
   renderOddsTable();
+  initLiveSync();
 
   // Console easter egg — only visible to anyone who opens dev tools.
   console.log(
@@ -614,6 +718,7 @@ document.addEventListener("DOMContentLoaded", () => {
     resetBtn.hidden = true;
 
     const order = runLottery();
+    publishLotteryState(order);
     await dramaticReveal(order);
 
     runBtn.textContent = "Lottery Complete";
