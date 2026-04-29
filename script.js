@@ -162,7 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Console easter egg — only visible to anyone who opens dev tools.
   console.log(
-    "%c sminky's season ends in week 1 ",
+    "%c Kill Yourself Sminky ",
     "background:#f5c518;color:#1a1300;font-size:18px;font-weight:700;padding:6px 12px;border-radius:6px;"
   );
 
