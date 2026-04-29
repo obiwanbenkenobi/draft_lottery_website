@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fantasy Football Draft Lottery</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>Fantasy Football Draft Lottery</h1>
+        <p class="subtitle">Six teams. Six picks. May the worst team win.</p>
+      </header>
+
+      <section class="card" id="setup">
+        <h2>Teams</h2>
+        <p class="hint">
+          Enter the team that finished in each standings position. Worse finishers
+          get better odds at the #1 pick.
+        </p>
+        <div class="teams-grid" id="teams-grid"></div>
+      </section>
+
+      <div class="actions">
+        <button id="run-btn" class="primary">Run Lottery</button>
+        <button id="reset-btn" class="ghost" hidden>Reset</button>
+      </div>
+
+      <section class="card results" id="results" hidden>
+        <h2>Draft Order</h2>
+        <ol id="results-list"></ol>
+      </section>
+
+      <section class="card odds">
+        <h2>Odds of being drawn</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Standings finish</th>
+              <th>Single-draw odds</th>
+            </tr>
+          </thead>
+          <tbody id="odds-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
