@@ -524,6 +524,8 @@ function presentNextReveal() {
 async function performRevealAnimation() {
   if (!revealState || revealState.busy) return false;
   revealState.busy = true;
+  // Clear the prior pick's worst-week banner now that the next draw is starting.
+  hideWorstWeekOverlay();
 
   const btn = document.getElementById("reveal-btn");
   if (btn) btn.disabled = true;
@@ -547,9 +549,7 @@ async function performRevealAnimation() {
   fillSlot(slot, team, `finished ${ordinal(winner.finish)}`);
   revealState.revealed.add(winner.finish);
 
-  await wait(1500);
-  hideWorstWeekOverlay();
-
+  // Worst-week overlay stays up until the next reveal begins (or the machine fades on pick 1).
   if (pickNum === 1) {
     if (btn) btn.hidden = true;
     document.getElementById("draw-status").textContent = "Draft order finalized.";
@@ -574,15 +574,14 @@ async function performRevealAnimation() {
 }
 
 async function performRevealAsHost() {
-  if (!revealState) return;
-  const beforePick = revealState.nextPick;
-  const ok = await performRevealAnimation();
-  if (ok) {
-    // pick 6 → revealedCount 1; pick 5 → 2; ...
-    const newCount = 7 - beforePick;
-    appliedRevealedCount = newCount;
-    publishRevealedCount(newCount);
-  }
+  if (!revealState || revealState.busy) return;
+  // Publish the new revealedCount BEFORE animating so viewers begin their animation
+  // in lockstep (gated only by network latency), not after the host's full ~3s reveal.
+  // pick 6 → revealedCount 1; pick 5 → 2; ...
+  const newCount = 7 - revealState.nextPick;
+  appliedRevealedCount = newCount;
+  publishRevealedCount(newCount);
+  await performRevealAnimation();
 }
 
 function updateOddsSidebar(pickNum, pool) {
