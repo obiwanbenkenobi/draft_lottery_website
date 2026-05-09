@@ -1,13 +1,17 @@
-// Cumulative thresholds out of 1000 — same buckets as the original Python script.
-// Each entry: { label, finish, threshold }. A roll < threshold belongs to that team.
+// Lottery weights — same buckets as the original Python script (cumulative-threshold deltas).
+// Lower-finishing teams get bigger weight (better odds at the top picks).
 const POSITIONS = [
-  { label: "seventh", finish: 7, threshold: 40 },
-  { label: "eighth", finish: 8, threshold: 110 },
-  { label: "ninth", finish: 9, threshold: 217 },
-  { label: "tenth", finish: 10, threshold: 360 },
-  { label: "eleventh", finish: 11, threshold: 627 },
-  { label: "twelfth", finish: 12, threshold: 1000 },
+  { label: "seventh", finish: 7, weight: 40 },
+  { label: "eighth", finish: 8, weight: 70 },
+  { label: "ninth", finish: 9, weight: 107 },
+  { label: "tenth", finish: 10, weight: 143 },
+  { label: "eleventh", finish: 11, weight: 267 },
+  { label: "twelfth", finish: 12, weight: 373 },
 ];
+
+// ±3 cap: a team's actual pick can't differ from their default position (13 - finish) by more than this.
+// 12th can only land in picks 1–4; 7th can only land in picks 3–6.
+const MAX_DRIFT = 3;
 
 const ORDINAL_SUFFIX = {
   7: "th",
@@ -18,16 +22,8 @@ const ORDINAL_SUFFIX = {
   12: "th",
 };
 
-// Per-finish-position metadata loaded from Sleeper. Keys are finish numbers (7..12).
-// Inputs always override names; the rest carries owner / avatar / max-PF / roster info.
 const teamData = {};
-
-// Playoff-team draft order (picks 7-12). Index 0 = pick 7 (6th place); index 5 = pick 12 (champion).
-// Each entry: { name, ownerName, avatarUrl, maxPf, rosterId } or null if not derivable.
 const playoffPicks = [];
-
-// First-round pick ownership for next season's draft, keyed by the original team's roster_id.
-// Only populated when a pick has been traded.
 const pickOwnerByRosterId = new Map();
 
 // --- Live sync state (Firebase Realtime Database) ---
@@ -36,33 +32,76 @@ const isHost = liveSyncSearch.has("host");
 const liveRoomId = window.lotteryRoomId || "default";
 const liveInstanceId = Math.random().toString(36).slice(2);
 let liveDb = null;
-let lastAppliedTimestamp = 0;
+let presenceRef = null;
+
+let appliedSetupAt = 0;
+let appliedSessionAt = 0;
+let appliedRevealedCount = 0;
+let activeOrder = null;
+// Becomes true once the viewer has processed at least one revealedCount snapshot.
+// Until then, any catch-up is "initial sync" (snap, no animation) rather than live (animate).
+let initialRevealedSyncDone = false;
 
 function ordinal(n) {
   return `${n}${ORDINAL_SUFFIX[n] ?? "th"}`;
 }
 
-function pick() {
-  const value = Math.floor(Math.random() * 1000);
-  return POSITIONS.find((p) => value < p.threshold);
+function defaultPickForFinish(finish) {
+  return 13 - finish;
 }
 
-function runLottery() {
+function isFinishEligibleForPick(finish, pickNum) {
+  return Math.abs(pickNum - defaultPickForFinish(finish)) <= MAX_DRIFT;
+}
+
+function eligibilityForPick(pickNum) {
+  return POSITIONS.filter((p) => isFinishEligibleForPick(p.finish, pickNum));
+}
+
+function weightedPick(pool) {
+  const total = pool.reduce((s, p) => s + p.weight, 0);
+  let r = Math.random() * total;
+  for (const p of pool) {
+    r -= p.weight;
+    if (r <= 0) return p;
+  }
+  return pool[pool.length - 1];
+}
+
+function tryLottery() {
   const order = [];
-  const taken = new Set();
-  while (order.length < 6) {
-    const p = pick();
-    if (!taken.has(p.finish)) {
-      taken.add(p.finish);
-      order.push(p);
-    }
+  const drawn = new Set();
+  for (let pickNum = 1; pickNum <= 6; pickNum++) {
+    const pool = eligibilityForPick(pickNum).filter((p) => !drawn.has(p.finish));
+    if (!pool.length) return null;
+    const chosen = weightedPick(pool);
+    order.push(chosen);
+    drawn.add(chosen.finish);
   }
   return order;
 }
 
+function runLottery() {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const result = tryLottery();
+    if (result) return result;
+  }
+  throw new Error("Lottery infeasible after 1000 attempts.");
+}
+
+function clearChildren(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+function formatWorstWeek(worst) {
+  if (!worst || worst.points == null) return null;
+  const opp = worst.opponentName ? ` vs @${worst.opponentName}` : "";
+  return `Worst: W${worst.week} • ${worst.points.toFixed(2)}${opp}`;
+}
+
 function renderTeamInputs() {
   const grid = document.getElementById("teams-grid");
-  grid.innerHTML = "";
+  clearChildren(grid);
   for (const p of POSITIONS) {
     const data = teamData[p.finish];
     const row = document.createElement("label");
@@ -102,6 +141,7 @@ function renderTeamInputs() {
       meta.textContent = metaParts.join(" • ");
       fields.appendChild(meta);
     }
+    // Worst week is intentionally NOT shown here — only during the ball-draw overlay.
 
     row.appendChild(fields);
     grid.appendChild(row);
@@ -110,12 +150,17 @@ function renderTeamInputs() {
 
 function renderOddsTable() {
   const body = document.getElementById("odds-body");
-  let prev = 0;
+  clearChildren(body);
+  const total = POSITIONS.reduce((s, p) => s + p.weight, 0);
   for (const p of POSITIONS) {
-    const odds = ((p.threshold - prev) / 10).toFixed(1);
-    prev = p.threshold;
+    const odds = ((p.weight / total) * 100).toFixed(1);
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${ordinal(p.finish)}</td><td>${odds}%</td>`;
+    const tdName = document.createElement("td");
+    tdName.textContent = ordinal(p.finish);
+    const tdOdds = document.createElement("td");
+    tdOdds.textContent = `${odds}%`;
+    tr.appendChild(tdName);
+    tr.appendChild(tdOdds);
     body.appendChild(tr);
   }
 }
@@ -132,6 +177,7 @@ function getTeams() {
       avatarUrl: data.avatarUrl || null,
       maxPf: data.maxPf ?? null,
       rosterId: data.rosterId ?? null,
+      worstWeek: data.worstWeek || null,
     };
   }
   return teams;
@@ -143,7 +189,7 @@ function wait(ms) {
 
 function buildPlaceholderSlots(count) {
   const list = document.getElementById("results-list");
-  list.innerHTML = "";
+  clearChildren(list);
   const slots = [];
   for (let i = 0; i < count; i++) {
     const li = document.createElement("li");
@@ -179,7 +225,6 @@ async function rollSlot(slot, allNames, duration) {
   let lastIdx = -1;
   while (elapsed < duration) {
     const remaining = duration - elapsed;
-    // Decelerate during the last 700ms for a "settling" feel.
     const interval = remaining < 700 ? 60 + (700 - remaining) * 0.45 : 60;
     let idx = Math.floor(Math.random() * allNames.length);
     if (idx === lastIdx && allNames.length > 1) {
@@ -197,46 +242,114 @@ function setupLotteryMachine() {
   const tumbler = document.getElementById("machine-tumbler");
   machine.hidden = false;
   machine.classList.remove("fading");
-  tumbler.innerHTML = "";
-
-  // Distribute balls across the tumbler with slight overlap for a "tumbling" feel.
-  POSITIONS.forEach((p) => {
-    const ball = document.createElement("div");
-    ball.className = "ball";
-    ball.dataset.finish = String(p.finish);
-
-    const x = 6 + Math.random() * 78; // % from left
-    const y = 12 + Math.random() * 60; // % from top
-    ball.style.left = `${x}%`;
-    ball.style.top = `${y}%`;
-
-    // Each ball gets its own float vector + duration so motion looks chaotic.
-    const dx = (Math.random() - 0.5) * 36;
-    const dy = (Math.random() - 0.5) * 28;
-    ball.style.setProperty("--ball-dx", `${dx}px`);
-    ball.style.setProperty("--ball-dy", `${dy}px`);
-    ball.style.animationDuration = `${1.2 + Math.random() * 1.1}s`;
-    ball.style.animationDelay = `${(-Math.random() * 2).toFixed(2)}s`;
-
-    ball.textContent = ordinal(p.finish);
-    tumbler.appendChild(ball);
-  });
+  clearChildren(tumbler);
+  hideWorstWeekOverlay();
 }
 
-async function drawBall(finishPosition, suspenseDuration) {
+function createBall(p) {
+  const ball = document.createElement("div");
+  ball.className = "ball";
+  ball.dataset.finish = String(p.finish);
+
+  const x = 4 + Math.random() * 80;
+  const y = 8 + Math.random() * 70;
+  ball.style.left = `${x}%`;
+  ball.style.top = `${y}%`;
+
+  const dx = (Math.random() - 0.5) * 36;
+  const dy = (Math.random() - 0.5) * 28;
+  ball.style.setProperty("--ball-dx", `${dx}px`);
+  ball.style.setProperty("--ball-dy", `${dy}px`);
+  ball.style.animationDuration = `${1.2 + Math.random() * 1.1}s`;
+  ball.style.animationDelay = `${(-Math.random() * 2).toFixed(2)}s`;
+
+  ball.textContent = ordinal(p.finish);
+  return ball;
+}
+
+function probDrawnLast(targetFinish, pool) {
+  if (pool.length === 1) {
+    return pool[0].finish === targetFinish ? 1 : 0;
+  }
+  let prob = 0;
+  const totalWeight = pool.reduce((s, p) => s + p.weight, 0);
+  for (const p of pool) {
+    if (p.finish === targetFinish) continue;
+    const pFirst = p.weight / totalWeight;
+    const remaining = pool.filter((x) => x.finish !== p.finish);
+    prob += pFirst * probDrawnLast(targetFinish, remaining);
+  }
+  return prob;
+}
+
+function computePickOdds(pool) {
+  return pool.map((p) => ({
+    finish: p.finish,
+    weight: p.weight,
+    label: p.label,
+    prob: probDrawnLast(p.finish, pool),
+  }));
+}
+
+function populateTumbler(pool) {
+  const tumbler = document.getElementById("machine-tumbler");
+  clearChildren(tumbler);
+  if (!pool.length) return;
+
+  const odds = computePickOdds(pool);
+  const targetTotal = pool.length === 1 ? 6 : pool.length * 6;
+
+  for (const o of odds) {
+    const count = Math.max(1, Math.round(o.prob * targetTotal));
+    for (let i = 0; i < count; i++) {
+      tumbler.appendChild(createBall(o));
+    }
+  }
+}
+
+async function drawBall(finishPosition, suspenseDuration, team) {
   const tumbler = document.getElementById("machine-tumbler");
   tumbler.classList.add("shaking");
   await wait(suspenseDuration);
   tumbler.classList.remove("shaking");
 
-  const winner = tumbler.querySelector(
+  const candidates = tumbler.querySelectorAll(
     `.ball[data-finish="${finishPosition}"]`
   );
-  if (winner) {
+  if (candidates.length) {
+    const winner = candidates[Math.floor(Math.random() * candidates.length)];
     winner.classList.add("winning");
-    await wait(850); // matches ball-winning animation duration
+    await wait(850);
     winner.classList.add("exited");
+    // Show the worst-week reveal AFTER the ball flies out so it doesn't obscure the climax.
+    showWorstWeekOverlay(team);
   }
+}
+
+function showWorstWeekOverlay(team) {
+  const overlay = document.getElementById("worst-week-overlay");
+  if (!overlay || !team?.worstWeek) return;
+  const { points, week, opponentName } = team.worstWeek;
+  const headline = document.getElementById("worst-week-headline");
+  const pointsEl = document.getElementById("worst-week-points");
+  const teamLabel = team.ownerName ? `@${team.ownerName}` : team.name;
+  const oppLabel = opponentName ? ` vs @${opponentName}` : "";
+  headline.textContent = `${teamLabel} — Week ${week}${oppLabel}`;
+  pointsEl.textContent = `${points.toFixed(2)} pts`;
+  overlay.hidden = false;
+  // Force reflow so transition fires after `hidden` was just removed.
+  // eslint-disable-next-line no-unused-expressions
+  overlay.offsetWidth;
+  overlay.classList.add("shown");
+}
+
+function hideWorstWeekOverlay() {
+  const overlay = document.getElementById("worst-week-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("shown");
+  setTimeout(() => {
+    overlay.hidden = true;
+  }, 280);
 }
 
 function hideLotteryMachine() {
@@ -260,7 +373,6 @@ function attachAvatar(slot, avatarUrl) {
 }
 
 function playoffFromLabel(pick) {
-  // pick → finishing position (pick 7 = 6th place, pick 12 = champion).
   switch (pick) {
     case 7: return "6th — lower 5/6 PF";
     case 8: return "5th — higher 5/6 PF";
@@ -277,7 +389,6 @@ function fillSlot(slot, team, fromLabel) {
   const fromEl = slot.querySelector(".from");
   const fields = slot.querySelector(".pick-fields");
 
-  // Clear any prior owner/traded lines (in case slot was pre-filled then re-filled).
   for (const el of fields.querySelectorAll(".pick-owner, .pick-traded")) {
     el.remove();
   }
@@ -298,6 +409,7 @@ function fillSlot(slot, team, fromLabel) {
     owner.textContent = ownerParts.join(" • ");
     fields.appendChild(owner);
   }
+  // Worst week intentionally not rendered as a persistent slot line — see overlay-only design.
 
   if (team.rosterId != null) {
     const tradedTo = pickOwnerByRosterId.get(team.rosterId);
@@ -316,17 +428,12 @@ function fillSlot(slot, team, fromLabel) {
   slot.classList.add("revealed");
 }
 
-async function dramaticReveal(order) {
-  const section = document.getElementById("results");
-  const status = document.getElementById("draw-status");
+let revealState = null;
+
+function buildRevealStateFromOrder(order) {
   const teams = getTeams();
-  section.hidden = false;
-
-  setupLotteryMachine();
-
   const slots = buildPlaceholderSlots(12);
 
-  // Pre-fill picks 7-12 from playoff data so they're visible while picks 1-6 are drawn.
   for (let i = 6; i < 12; i++) {
     const data = playoffPicks[i - 6];
     const slot = slots[i];
@@ -337,34 +444,198 @@ async function dramaticReveal(order) {
     }
   }
 
-  const allNames = Object.values(teams).map((t) => t.name).filter(Boolean);
+  return {
+    order,
+    teams,
+    slots,
+    revealed: new Set(),
+    nextPick: 6,
+    busy: false,
+  };
+}
 
+async function startReveal(order) {
+  const section = document.getElementById("results");
+  section.hidden = false;
+  setupLotteryMachine();
+  revealState = buildRevealStateFromOrder(order);
   section.scrollIntoView({ behavior: "smooth", block: "start" });
-  await wait(600);
+  await wait(400);
+  presentNextReveal();
+}
 
-  for (let i = order.length - 1; i >= 0; i--) {
-    const slot = slots[i];
-    const team = teams[order[i].finish];
+// Snap reveals up to alreadyRevealed without animation, then resume live.
+async function startRevealAtCount(order, alreadyRevealed) {
+  const section = document.getElementById("results");
+  section.hidden = false;
+  setupLotteryMachine();
+  revealState = buildRevealStateFromOrder(order);
 
-    status.textContent =
-      i === 0 ? "And the #1 pick goes to…" : `Drawing pick ${i + 1}…`;
-
-    await wait(450);
-
-    // Tumbler shakes and slot text rolls in parallel; both end together.
-    const duration = 1200 + (order.length - 1 - i) * 400;
-    await Promise.all([
-      rollSlot(slot, allNames, duration),
-      drawBall(order[i].finish, duration),
-    ]);
-
-    fillSlot(slot, team, `finished ${ordinal(order[i].finish)}`);
-
-    await wait(i === 0 ? 1400 : 750);
+  for (let r = 0; r < alreadyRevealed && r < 6; r++) {
+    const pickNum = 6 - r;
+    const winner = order[pickNum - 1];
+    if (!winner) break;
+    const team = revealState.teams[winner.finish];
+    const slot = revealState.slots[pickNum - 1];
+    fillSlot(slot, team, `finished ${ordinal(winner.finish)}`);
+    revealState.revealed.add(winner.finish);
+    revealState.nextPick = pickNum - 1;
   }
 
-  hideLotteryMachine();
-  status.textContent = "Draft order finalized.";
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+  await wait(200);
+
+  if (alreadyRevealed >= 6) {
+    document.getElementById("draw-status").textContent = "Draft order finalized.";
+    const sidebar = document.getElementById("odds-sidebar");
+    if (sidebar) sidebar.hidden = true;
+    hideLotteryMachine();
+    revealState = null;
+    return;
+  }
+  presentNextReveal();
+}
+
+function presentNextReveal() {
+  if (!revealState) return;
+  const pickNum = revealState.nextPick;
+  const pool = eligibilityForPick(pickNum).filter(
+    (p) => !revealState.revealed.has(p.finish)
+  );
+
+  populateTumbler(pool);
+  updateOddsSidebar(pickNum, pool);
+
+  const status = document.getElementById("draw-status");
+  status.textContent =
+    pickNum === 1
+      ? "And the #1 pick goes to…"
+      : `Click to reveal pick ${pickNum}.`;
+
+  const btn = document.getElementById("reveal-btn");
+  if (btn) {
+    btn.textContent = pickNum === 1 ? "Reveal pick 1!" : `Reveal pick ${pickNum}`;
+    // Only the host sees the reveal button; viewers' UI is driven by remote increments.
+    btn.hidden = !isHost;
+    btn.disabled = false;
+  }
+}
+
+async function performRevealAnimation() {
+  if (!revealState || revealState.busy) return false;
+  revealState.busy = true;
+
+  const btn = document.getElementById("reveal-btn");
+  if (btn) btn.disabled = true;
+
+  const pickNum = revealState.nextPick;
+  const winner = revealState.order[pickNum - 1];
+  const team = revealState.teams[winner.finish];
+  const slot = revealState.slots[pickNum - 1];
+
+  const suspenseDuration = 700 + (6 - pickNum) * 250;
+
+  const allNames = Object.values(revealState.teams)
+    .map((t) => t.name)
+    .filter(Boolean);
+
+  await Promise.all([
+    rollSlot(slot, allNames, suspenseDuration),
+    drawBall(winner.finish, suspenseDuration, team),
+  ]);
+
+  fillSlot(slot, team, `finished ${ordinal(winner.finish)}`);
+  revealState.revealed.add(winner.finish);
+
+  await wait(1500);
+  hideWorstWeekOverlay();
+
+  if (pickNum === 1) {
+    if (btn) btn.hidden = true;
+    document.getElementById("draw-status").textContent = "Draft order finalized.";
+    const sidebar = document.getElementById("odds-sidebar");
+    if (sidebar) sidebar.hidden = true;
+    await wait(800);
+    hideLotteryMachine();
+    revealState = null;
+    if (isHost) {
+      const resetBtn = document.getElementById("reset-btn");
+      if (resetBtn) resetBtn.hidden = false;
+      const runBtn = document.getElementById("run-btn");
+      if (runBtn) runBtn.textContent = "Lottery Complete";
+    }
+  } else {
+    revealState.nextPick = pickNum - 1;
+    revealState.busy = false;
+    await wait(700);
+    presentNextReveal();
+  }
+  return true;
+}
+
+async function performRevealAsHost() {
+  if (!revealState) return;
+  const beforePick = revealState.nextPick;
+  const ok = await performRevealAnimation();
+  if (ok) {
+    // pick 6 → revealedCount 1; pick 5 → 2; ...
+    const newCount = 7 - beforePick;
+    appliedRevealedCount = newCount;
+    publishRevealedCount(newCount);
+  }
+}
+
+function updateOddsSidebar(pickNum, pool) {
+  const sidebar = document.getElementById("odds-sidebar");
+  const list = document.getElementById("odds-sidebar-list");
+  const numEl = document.getElementById("odds-pick-num");
+  if (!sidebar || !list || !numEl) return;
+
+  numEl.textContent = String(pickNum);
+  clearChildren(list);
+
+  if (!pool.length) {
+    sidebar.hidden = true;
+    return;
+  }
+
+  const odds = computePickOdds(pool);
+  const sorted = [...odds].sort((a, b) => b.prob - a.prob);
+
+  for (const o of sorted) {
+    const pct = o.prob * 100;
+    const teamName = revealState?.teams?.[o.finish]?.name || ordinal(o.finish);
+
+    const li = document.createElement("li");
+    li.className = "odds-row";
+    li.dataset.finish = String(o.finish);
+
+    const swatch = document.createElement("span");
+    swatch.className = `odds-swatch swatch-${o.finish}`;
+    li.appendChild(swatch);
+
+    const label = document.createElement("span");
+    label.className = "odds-label";
+    label.textContent = teamName;
+    li.appendChild(label);
+
+    const bar = document.createElement("span");
+    bar.className = "odds-bar";
+    const fill = document.createElement("span");
+    fill.className = "odds-bar-fill";
+    fill.style.width = `${pct.toFixed(1)}%`;
+    bar.appendChild(fill);
+    li.appendChild(bar);
+
+    const pctEl = document.createElement("span");
+    pctEl.className = "odds-pct";
+    pctEl.textContent = pct >= 99.5 ? "100%" : `${pct.toFixed(0)}%`;
+    li.appendChild(pctEl);
+
+    list.appendChild(li);
+  }
+
+  sidebar.hidden = false;
 }
 
 async function handleSleeperResponse(res) {
@@ -384,29 +655,25 @@ function buildAvatarUrl(user) {
   return null;
 }
 
-// Walks the Sleeper winners_bracket and returns the playoff-team draft order.
-// Returns array of 6 entries: [pick7Team, pick8Team, ..., pick12Team], where
-// pick 7 = 6th place, pick 12 = champion. Picks 7 and 8 are split by max PF
-// (lower max PF → pick 7) per league rule.
 function computePlayoffOrder(bracket, rosterById) {
   const out = [null, null, null, null, null, null];
   if (!Array.isArray(bracket)) return out;
 
   for (const m of bracket) {
     if (m.p === 1) {
-      out[5] = rosterById.get(m.w) || null; // champion → pick 12
-      out[4] = rosterById.get(m.l) || null; // runner-up → pick 11
+      out[5] = rosterById.get(m.w) || null;
+      out[4] = rosterById.get(m.l) || null;
     } else if (m.p === 3) {
-      out[3] = rosterById.get(m.w) || null; // 3rd place → pick 10
-      out[2] = rosterById.get(m.l) || null; // 4th place → pick 9
+      out[3] = rosterById.get(m.w) || null;
+      out[2] = rosterById.get(m.l) || null;
     } else if (m.p === 5) {
       const t1 = m.t1 != null ? rosterById.get(m.t1) : null;
       const t2 = m.t2 != null ? rosterById.get(m.t2) : null;
       if (t1 && t2) {
         const [higher, lower] =
           t1.maxPf >= t2.maxPf ? [t1, t2] : [t2, t1];
-        out[1] = higher; // higher max PF → 5th → pick 8
-        out[0] = lower; // lower max PF → 6th → pick 7
+        out[1] = higher;
+        out[0] = lower;
       } else if (t1 || t2) {
         out[1] = t1 || t2;
       }
@@ -416,8 +683,6 @@ function computePlayoffOrder(bracket, rosterById) {
   return out;
 }
 
-// Builds a map of original-roster-id → current owner for next-season round-1 picks.
-// Walks the trade chain so a pick traded A→B→C lands on C.
 function buildPickOwnerMap(tradedPicks, season, rosterById) {
   pickOwnerByRosterId.clear();
   if (!Array.isArray(tradedPicks)) return;
@@ -460,12 +725,70 @@ function buildPickOwnerMap(tradedPicks, season, rosterById) {
   }
 }
 
+// Pulls weekly matchups for each regular-season week and computes each roster's lowest score.
+// Sleeper returns matchups as [{matchup_id, roster_id, points, ...}]; opponents share matchup_id.
+async function fetchWorstWeeks(leagueId, league, rosterById) {
+  const playoffStart = league?.settings?.playoff_week_start ?? 15;
+  const lastRegular = Math.max(0, playoffStart - 1);
+  if (!lastRegular) return new Map();
+
+  const base = `https://api.sleeper.app/v1/league/${encodeURIComponent(leagueId)}`;
+  const weeks = Array.from({ length: lastRegular }, (_, i) => i + 1);
+
+  const responses = await Promise.all(
+    weeks.map((w) =>
+      fetch(`${base}/matchups/${w}`).then((r) => (r.ok ? r.json() : []))
+    )
+  );
+
+  const worst = new Map();
+
+  responses.forEach((matchups, idx) => {
+    if (!Array.isArray(matchups)) return;
+    const week = idx + 1;
+
+    const byMatchupId = new Map();
+    for (const m of matchups) {
+      if (!byMatchupId.has(m.matchup_id)) byMatchupId.set(m.matchup_id, []);
+      byMatchupId.get(m.matchup_id).push(m);
+    }
+
+    for (const m of matchups) {
+      const points = m.points ?? 0;
+      // Skip unplayed weeks (Sleeper reports 0 for not-yet-played).
+      if (points <= 0) continue;
+
+      const pair = byMatchupId.get(m.matchup_id) || [];
+      const opp = pair.find((x) => x.roster_id !== m.roster_id);
+      const oppRoster = opp ? rosterById.get(opp.roster_id) : null;
+
+      const prev = worst.get(m.roster_id);
+      if (!prev || points < prev.points) {
+        worst.set(m.roster_id, {
+          points,
+          week,
+          opponentRosterId: opp?.roster_id ?? null,
+          opponentName: oppRoster?.ownerName || null,
+        });
+      }
+    }
+  });
+
+  return worst;
+}
+
+// --- Firebase live sync ---
+
 function isFirebaseConfigured() {
   const c = window.firebaseConfig;
   if (!c || typeof firebase === "undefined") return false;
   if (!c.apiKey || c.apiKey.startsWith("YOUR_")) return false;
   if (!c.databaseURL || c.databaseURL.includes("YOUR_PROJECT")) return false;
   return true;
+}
+
+function roomRef(path) {
+  return liveDb.ref(`lottery/${liveRoomId}/${path}`);
 }
 
 function initLiveSync() {
@@ -478,54 +801,124 @@ function initLiveSync() {
     return;
   }
 
-  liveDb.ref(`lottery/${liveRoomId}`).on("value", (snap) => {
-    const data = snap.val();
-    if (data) handleRemoteLotteryState(data);
-  });
-
+  const status = document.getElementById("live-status");
   const indicator = document.getElementById("live-indicator");
-  if (indicator) {
-    indicator.hidden = false;
-    indicator.textContent = isHost ? "Live · Host" : "Live · Viewer";
-  }
+  if (status) status.hidden = false;
+  if (indicator) indicator.textContent = isHost ? "Live · Host" : "Live · Viewer";
 
   if (!isHost) {
     document.body.classList.add("viewer-mode");
     const waiting = document.getElementById("waiting-card");
     if (waiting) waiting.hidden = false;
   }
+
+  setupPresence();
+  watchPresence();
+
+  roomRef("setup").on("value", (snap) => {
+    const data = snap.val();
+    if (data) handleRemoteSetup(data);
+  });
+
+  roomRef("session").on("value", (snap) => {
+    const data = snap.val();
+    if (data) {
+      handleRemoteSession(data);
+    } else if (appliedSessionAt > 0) {
+      // Session was cleared (host reset). Clear the viewer's reveal UI.
+      handleSessionCleared();
+    }
+  });
+
+  roomRef("revealedCount").on("value", (snap) => {
+    const n = snap.val() ?? 0;
+    handleRemoteRevealedCount(n);
+  });
 }
 
-function publishLotteryState(order) {
+function setupPresence() {
+  presenceRef = liveDb.ref(`presence/${liveRoomId}/${liveInstanceId}`);
+  presenceRef.onDisconnect().remove();
+
+  // Re-establish on reconnect (e.g., wake from sleep, transient drop).
+  liveDb.ref(".info/connected").on("value", (snap) => {
+    if (snap.val() !== true) return;
+    presenceRef.onDisconnect().remove();
+    presenceRef.set({
+      role: isHost ? "host" : "viewer",
+      joinedAt: firebase.database.ServerValue.TIMESTAMP,
+    });
+  });
+}
+
+function watchPresence() {
+  const chip = document.getElementById("watching-chip");
+  const countEl = document.getElementById("watching-count");
+  if (!chip || !countEl) return;
+
+  liveDb.ref(`presence/${liveRoomId}`).on("value", (snap) => {
+    const data = snap.val() || {};
+    const count = Object.keys(data).length;
+    countEl.textContent = String(count);
+    chip.hidden = count === 0;
+  });
+}
+
+function publishSetup() {
   if (!liveDb || !isHost) return;
   const payload = {
-    hostInstanceId: liveInstanceId,
     publishedAt: firebase.database.ServerValue.TIMESTAMP,
-    order: order.map((p) => ({
-      label: p.label,
-      finish: p.finish,
-      threshold: p.threshold,
-    })),
     teamData: { ...teamData },
     playoffPicks: playoffPicks.map((p) => p || null),
     pickOwners: Object.fromEntries(
       Array.from(pickOwnerByRosterId.entries()).map(([k, v]) => [String(k), v])
     ),
   };
-  liveDb.ref(`lottery/${liveRoomId}`).set(payload).catch((err) => {
-    console.warn("Failed to publish lottery state:", err);
+  roomRef("setup").set(payload).catch((err) => {
+    console.warn("Failed to publish setup:", err);
   });
 }
 
-async function handleRemoteLotteryState(data) {
-  if (!data || !data.publishedAt) return;
-  if (data.publishedAt <= lastAppliedTimestamp) return;
-  lastAppliedTimestamp = data.publishedAt;
+function publishSession(order) {
+  if (!liveDb || !isHost) return;
+  const payload = {
+    startedAt: firebase.database.ServerValue.TIMESTAMP,
+    hostInstanceId: liveInstanceId,
+    order: order.map((p) => ({
+      label: p.label,
+      finish: p.finish,
+      weight: p.weight,
+    })),
+  };
+  Promise.all([
+    roomRef("session").set(payload),
+    roomRef("revealedCount").set(0),
+  ]).catch((err) => {
+    console.warn("Failed to publish session:", err);
+  });
+}
 
-  // Host already animated locally from their own click — don't replay.
-  if (isHost) return;
+function publishRevealedCount(n) {
+  if (!liveDb || !isHost) return;
+  roomRef("revealedCount").set(n).catch((err) => {
+    console.warn("Failed to publish revealedCount:", err);
+  });
+}
 
-  // Hydrate state for the viewer.
+function clearSession() {
+  if (!liveDb || !isHost) return;
+  Promise.all([
+    roomRef("session").remove(),
+    roomRef("revealedCount").set(0),
+  ]).catch((err) => {
+    console.warn("Failed to clear session:", err);
+  });
+}
+
+function handleRemoteSetup(data) {
+  if (!data?.publishedAt || data.publishedAt <= appliedSetupAt) return;
+  appliedSetupAt = data.publishedAt;
+
   for (const key of Object.keys(teamData)) delete teamData[key];
   if (data.teamData) {
     for (const [finish, info] of Object.entries(data.teamData)) {
@@ -547,12 +940,113 @@ async function handleRemoteLotteryState(data) {
 
   renderTeamInputs();
 
+  if (!isHost) {
+    const waiting = document.getElementById("waiting-card");
+    const text = document.getElementById("waiting-text");
+    if (waiting && text && !activeOrder) {
+      waiting.hidden = false;
+      text.textContent = "Teams loaded. Waiting for the host to start the lottery…";
+    }
+  }
+}
+
+async function handleRemoteSession(data) {
+  if (!data?.startedAt || data.startedAt <= appliedSessionAt) return;
+  appliedSessionAt = data.startedAt;
+  // Reset session-scoped flags. Don't reset appliedRevealedCount here — a prior
+  // revealedCount snapshot might already have arrived for this same session.
+  initialRevealedSyncDone = false;
+
+  if (!Array.isArray(data.order) || !data.order.length) return;
+  activeOrder = data.order;
+
+  // Host is already animating locally — don't re-trigger from its own echo.
+  if (isHost && data.hostInstanceId === liveInstanceId) return;
+
   const waiting = document.getElementById("waiting-card");
   if (waiting) waiting.hidden = true;
 
-  if (Array.isArray(data.order) && data.order.length) {
-    await dramaticReveal(data.order);
+  // Build reveal state at whatever revealedCount we currently know about
+  // (could be 0, or could be N if the count snapshot raced ahead of session).
+  await startRevealAtCount(activeOrder, appliedRevealedCount);
+  initialRevealedSyncDone = true;
+}
+
+function handleSessionCleared() {
+  appliedSessionAt = 0;
+  appliedRevealedCount = 0;
+  initialRevealedSyncDone = false;
+  activeOrder = null;
+  revealState = null;
+
+  document.getElementById("results").hidden = true;
+  const list = document.getElementById("results-list");
+  if (list) clearChildren(list);
+  document.getElementById("draw-status").textContent = "";
+  const sidebar = document.getElementById("odds-sidebar");
+  if (sidebar) sidebar.hidden = true;
+  hideWorstWeekOverlay();
+  const machine = document.getElementById("lottery-machine");
+  if (machine) {
+    machine.hidden = true;
+    machine.classList.remove("fading");
   }
+
+  if (!isHost) {
+    const waiting = document.getElementById("waiting-card");
+    const text = document.getElementById("waiting-text");
+    if (waiting && text) {
+      waiting.hidden = false;
+      text.textContent = "Waiting for the host to start the draft lottery…";
+    }
+  }
+}
+
+function snapReveals(deltaCount) {
+  for (let i = 0; i < deltaCount && revealState; i++) {
+    const pickNum = revealState.nextPick;
+    const winner = revealState.order[pickNum - 1];
+    if (!winner) break;
+    const team = revealState.teams[winner.finish];
+    const slot = revealState.slots[pickNum - 1];
+    fillSlot(slot, team, `finished ${ordinal(winner.finish)}`);
+    revealState.revealed.add(winner.finish);
+    revealState.nextPick = pickNum - 1;
+  }
+}
+
+async function handleRemoteRevealedCount(n) {
+  if (n <= appliedRevealedCount) return;
+  if (isHost) {
+    appliedRevealedCount = n;
+    return;
+  }
+
+  const prev = appliedRevealedCount;
+  appliedRevealedCount = n;
+
+  // No session yet — handleRemoteSession will read appliedRevealedCount when it arrives.
+  if (!activeOrder) return;
+
+  if (!revealState) {
+    // Session arrived but reveal state not built yet (possible if session handler is mid-await).
+    await startRevealAtCount(activeOrder, n);
+    initialRevealedSyncDone = true;
+    return;
+  }
+
+  // First revealedCount tick after session: those reveals are historic — snap.
+  if (!initialRevealedSyncDone) {
+    snapReveals(n - prev);
+    initialRevealedSyncDone = true;
+    if (revealState) presentNextReveal();
+    return;
+  }
+
+  // Live update — animate. For burst increments, snap intermediates and animate the last.
+  const delta = n - prev;
+  if (delta > 1) snapReveals(delta - 1);
+  if (revealState) await performRevealAnimation();
 }
 
 async function loadSleeperLeague(leagueId) {
@@ -593,8 +1087,8 @@ async function loadSleeperLeague(leagueId) {
     return entry;
   });
 
-  // Identify non-playoff teams by record, then order them by max points-for.
-  // Highest max PF = 7th seed (worst odds), lowest max PF = 12th (best odds).
+  const worstByRoster = await fetchWorstWeeks(leagueId, league, rosterById);
+
   const playoffTeams = league?.settings?.playoff_teams ?? 6;
   const byRecord = [...enriched].sort(
     (a, b) => b.wins - a.wins || b.ties - a.ties || b.fpts - a.fpts
@@ -605,7 +1099,6 @@ async function loadSleeperLeague(leagueId) {
     .sort((a, b) => b.maxPf - a.maxPf)
     .slice(0, lotterySize);
 
-  // Reset persistent Sleeper state.
   for (const key of Object.keys(teamData)) delete teamData[key];
   playoffPicks.length = 0;
 
@@ -619,11 +1112,11 @@ async function loadSleeperLeague(leagueId) {
       avatarUrl: standing.avatarUrl,
       maxPf: standing.maxPf,
       rosterId: standing.rosterId,
+      worstWeek: worstByRoster.get(standing.rosterId) || null,
     };
     filled++;
   });
 
-  // Compute playoff finishing order from the winners_bracket (picks 7-12).
   const playoffOrder = computePlayoffOrder(bracket, rosterById);
   for (const standing of playoffOrder) {
     if (!standing) {
@@ -635,11 +1128,11 @@ async function loadSleeperLeague(leagueId) {
         avatarUrl: standing.avatarUrl,
         maxPf: standing.maxPf,
         rosterId: standing.rosterId,
+        worstWeek: worstByRoster.get(standing.rosterId) || null,
       });
     }
   }
 
-  // First-round pick ownership for next year's draft.
   const nextSeason = String(Number(league?.season || 0) + 1);
   buildPickOwnerMap(tradedPicks, nextSeason, rosterById);
 
@@ -655,7 +1148,6 @@ document.addEventListener("DOMContentLoaded", () => {
   renderOddsTable();
   initLiveSync();
 
-  // Console easter egg — only visible to anyone who opens dev tools.
   console.log(
     "%c Kill Yourself Sminky ",
     "background:#f5c518;color:#1a1300;font-size:18px;font-weight:700;padding:6px 12px;border-radius:6px;"
@@ -697,6 +1189,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (playoffCount) parts.push(`${playoffCount} playoff team${playoffCount === 1 ? "" : "s"}`);
       if (tradedCount) parts.push(`${tradedCount} traded 1st-round pick${tradedCount === 1 ? "" : "s"}`);
       setSleeperStatus(parts.join(", ") + ".", "success");
+      // Push setup so viewers see the team list before the host runs the lottery.
+      publishSetup();
     } catch (err) {
       setSleeperStatus(err.message || "Failed to load league.", "error");
     } finally {
@@ -718,19 +1212,34 @@ document.addEventListener("DOMContentLoaded", () => {
     resetBtn.hidden = true;
 
     const order = runLottery();
-    publishLotteryState(order);
-    await dramaticReveal(order);
-
-    runBtn.textContent = "Lottery Complete";
-    resetBtn.hidden = false;
+    activeOrder = order;
+    // Re-publish setup in case the host edited team-name inputs after Sleeper load.
+    publishSetup();
+    publishSession(order);
+    await startReveal(order);
   });
+
+  const revealBtn = document.getElementById("reveal-btn");
+  if (revealBtn) {
+    revealBtn.addEventListener("click", () => {
+      if (isHost) performRevealAsHost();
+    });
+  }
 
   resetBtn.addEventListener("click", () => {
     document.getElementById("results").hidden = true;
-    document.getElementById("results-list").innerHTML = "";
+    const list = document.getElementById("results-list");
+    clearChildren(list);
     document.getElementById("draw-status").textContent = "";
+    const sidebar = document.getElementById("odds-sidebar");
+    if (sidebar) sidebar.hidden = true;
+    const rb = document.getElementById("reveal-btn");
+    if (rb) rb.hidden = true;
+    revealState = null;
+    activeOrder = null;
     runBtn.disabled = false;
     runBtn.textContent = "Run Lottery";
     resetBtn.hidden = true;
+    clearSession();
   });
 });

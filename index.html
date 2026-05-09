@@ -16,7 +16,12 @@
       <header>
         <h1>Fantasy Football Draft Lottery</h1>
         <p class="subtitle">Six teams. Six picks. May the worst team win.</p>
-        <span id="live-indicator" class="live-indicator" hidden></span>
+        <div class="live-status" hidden id="live-status">
+          <span id="live-indicator" class="live-indicator"></span>
+          <span id="watching-chip" class="watching-chip" hidden>
+            <span id="watching-count">0</span> watching
+          </span>
+        </div>
       </header>
 
       <section class="card waiting-card" id="waiting-card" hidden>
@@ -66,8 +71,22 @@
         <h2>Draft Order</h2>
         <p class="draw-status" id="draw-status"></p>
         <div class="lottery-machine" id="lottery-machine" hidden>
-          <div class="machine-tumbler" id="machine-tumbler"></div>
+          <div class="worst-week-overlay" id="worst-week-overlay" hidden>
+            <span class="worst-week-label">Worst week</span>
+            <span class="worst-week-headline" id="worst-week-headline"></span>
+            <span class="worst-week-points" id="worst-week-points"></span>
+          </div>
+          <div class="machine-frame">
+            <div class="machine-tumbler" id="machine-tumbler"></div>
+            <aside class="odds-sidebar" id="odds-sidebar" hidden>
+              <h3>Pick <span id="odds-pick-num"></span> odds</h3>
+              <ul id="odds-sidebar-list"></ul>
+            </aside>
+          </div>
           <p class="machine-label">Lottery Machine</p>
+          <div class="machine-actions">
+            <button id="reveal-btn" class="primary" hidden>Reveal pick</button>
+          </div>
         </div>
         <ol id="results-list"></ol>
       </section>

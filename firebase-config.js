@@ -6,13 +6,13 @@
 // You also need to enable Realtime Database in test mode and set the rules so
 // reads/writes are allowed (see README or commit message for sample rules).
 window.firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
+  apiKey: "AIzaSyBXqUHrMKia51mssM_t0Y6e5VZWC_itAqs",
+  authDomain: "fantasy-draft-lottery-odds.firebaseapp.com",
+  databaseURL: "https://fantasy-draft-lottery-odds-default-rtdb.firebaseio.com",
+  projectId: "fantasy-draft-lottery-odds",
+  storageBucket: "fantasy-draft-lottery-odds.firebasestorage.app",
+  messagingSenderId: "7098049692",
+  appId: "1:7098049692:web:fb87cce8bc23213a277959",
 };
 
 // Optional: change to namespace multiple lotteries on the same Firebase project.
